@@ -1,6 +1,7 @@
 #include <ESP8266WiFi.h>
 #include <time.h>
 #include <U8g2lib.h>
+#include <DHT.h>
 #include <Wire.h>
 #include <WiFiManager.h>
 #include <PubSubClient.h>
@@ -8,6 +9,10 @@
 #include <WiFiClientSecureBearSSL.h>
 #include <ArduinoJson.h>
 #include <cstring>
+
+#define DHTPIN D4
+#define DHTTYPE DHT11
+DHT dht(DHTPIN, DHTTYPE);
 
 //数据初始化
 String Future_url;
@@ -35,6 +40,7 @@ struct Weather{
 unsigned long Future_updateTime, Today_updateTime;
 unsigned long lastMQTTStateUpdate ;
 
+unsigned long lastDHTUpdate = 0;
 float temperature,humidity;
 struct State{
     bool remote_mode; 
@@ -56,6 +62,17 @@ PubSubClient client(espClient);
 char msg[50];
 char position[10];
 String clientID = "ESP8266Client-";
+
+void DHT_update()
+{
+    temperature = dht.readTemperature();
+    humidity = dht.readHumidity();
+    if(isnan(temperature) || isnan(humidity))
+    {
+        Serial.println("读取DHT11传感器失败!");
+        return;
+    }
+}
 
 void url_update()
 {
@@ -318,6 +335,7 @@ void getWeather(String url,enum WeatherType type)
 void setup() {
     // put your setup code here, to run once:
     Serial.begin(115200);
+    dht.begin();
     url_update();
     
     wifiManager.addParameter(&custom_city);
@@ -374,21 +392,26 @@ void loop() {
         getWeather(Today_url,SearchType = Today);
         state.update_today_flag = false;
     }
-
-    if(millis() - lastMQTTStateUpdate > 60000) // 每5分钟发布一次状态
+    if(millis() - lastDHTUpdate > 10000) // 每10s更新一次传感器数据
+    {
+        DHT_update();
+        State_publish(false, false, true);
+        lastDHTUpdate = millis();
+    }
+    if(millis() - lastMQTTStateUpdate > 60000) // 每1分钟发布一次状态
     {
         State_publish(true, false, true);
         lastMQTTStateUpdate = millis();
-        // 每隔10分钟更新一次天气信息
-        if (millis() - Today_updateTime > 600000) {
-            Serial.println("更新当前天气...");
-            getWeather(Today_url,SearchType = Today);
-            Serial.println("当前天气更新完成");
-            if (millis() - Future_updateTime > 21600000) {
-                Serial.println("更新未来天气...");
-                getWeather(Future_url,SearchType = Future);
-                Serial.println("未来天气更新完成");
-            }
+    }
+    // 每隔10分钟更新一次天气信息
+    if (millis() - Today_updateTime > 600000) {
+        Serial.println("更新当前天气...");
+        getWeather(Today_url,SearchType = Today);
+        Serial.println("当前天气更新完成");
+        if (millis() - Future_updateTime > 21600000) {
+            Serial.println("更新未来天气...");
+            getWeather(Future_url,SearchType = Future);
+            Serial.println("未来天气更新完成");
         }
     }
 

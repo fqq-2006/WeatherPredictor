@@ -27,7 +27,8 @@
                 "C:\\Users\\fqq\\AppData\\Local\\Arduino15\\packages\\esp8266\\hardware\\esp8266\\3.1.1\\libraries\\DNSServer\\src",
                 "C:\\Users\\fqq\\AppData\\Local\\Arduino15\\packages\\esp8266\\hardware\\esp8266\\3.1.1\\libraries\\ESP8266HTTPClient\\src",
                 "C:\\Users\\fqq\\AppData\\Local\\Arduino15\\packages\\esp8266\\hardware\\esp8266\\3.1.1\\libraries\\Wire",
-                "D:\\文档\\Arduino\\libraries\\**"
+                "D:\\文档\\Arduino\\libraries\\**",
+                "D:\\文档\\Arduino\\libraries\\DHT_sensor_library"
             ],
             "forcedInclude": [
                 "C:\\Users\\fqq\\AppData\\Local\\Arduino15\\packages\\esp8266\\hardware\\esp8266\\3.1.1\\cores\\esp8266\\Arduino.h"
