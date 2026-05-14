@@ -10,9 +10,52 @@
 #include <ArduinoJson.h>
 #include <cstring>
 
-#define DHTPIN D4
+#define DHTPIN 4
 #define DHTTYPE DHT11
 DHT dht(DHTPIN, DHTTYPE);
+
+#define BUTTON_PAGE 5
+#define BUTTON_VOICE 6
+
+U8G2_SSD1306_128X64_NONAME_1_HW_I2C u8g2(U8G2_R0, /* reset=*/ U8X8_PIN_NONE);
+
+static const unsigned char sun_bits[] U8X8_PROGMEM = {
+  0x00,0x00,0x00,0x00,0x3C,0x00,0x42,0x00,0x81,0x80,0xA5,0x80,0x81,0x80,0x81,0x80,
+  0xA5,0x80,0x81,0x80,0x81,0x80,0x42,0x00,0x3C,0x00,0x00,0x00,0x00,0x00,0x00,0x00
+};
+static const unsigned char cloud_bits[] U8X8_PROGMEM = {
+  0x00,0x00,0x00,0x00,0x1C,0x00,0x2E,0x00,0x5F,0x00,0x7F,0x80,0x7F,0x80,0x3E,0x00,
+  0x1C,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00
+};
+static const unsigned char rain_bits[] U8X8_PROGMEM = {
+  0x00,0x00,0x00,0x00,0x1C,0x00,0x2E,0x00,0x5F,0x00,0x7F,0x80,0x7F,0x80,0x3E,0x00,
+  0x10,0x00,0x28,0x00,0x10,0x00,0x28,0x00,0x10,0x00,0x28,0x00,0x00,0x00,0x00,0x00
+};
+static const unsigned char snow_bits[] U8X8_PROGMEM = {
+  0x00,0x00,0x00,0x00,0x10,0x00,0x10,0x00,0x92,0x40,0x7C,0x00,0x10,0x00,0x7C,0x00,
+  0x92,0x40,0x10,0x00,0x10,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00
+};
+static const unsigned char overcast_bits[] U8X8_PROGMEM = {
+  0x00,0x00,0x00,0x00,0x1C,0x00,0x2E,0x00,0x5F,0x00,0x7F,0x80,0x7F,0x80,0x7F,0x80,
+  0x3E,0x00,0x1C,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00
+};
+// 全局显示/播报缓冲区（避免栈溢出）
+char timeBuf[6];
+char temperatureBuf[16];
+char sensorBuf[32];
+char titleBuf[64];
+char rangeBuf[32];
+char dayNightBuf[120];
+char detailsBuf[64];
+char mqttBuffer[256];
+String voiceText;
+
+unsigned long lastDisplayUpdate = 0;
+unsigned long lastPageButtonMillis = 0;
+unsigned long lastVoiceButtonMillis = 0;
+bool pageButtonPressed = false;
+bool voiceButtonPressed = false;
+
 
 //数据初始化
 String Future_url;
@@ -48,9 +91,19 @@ struct State{
     bool voice_state;
     String city;
     bool voice_update;
-    bool update_today_flag = false;
-    bool update_future_flag = false;
-} state = {false,0,false,"beijing"};
+    bool update_today_flag ;
+    bool update_future_flag ;
+} state = {false,0,true,"beijing",false,false,false};
+
+void DrawStatusBar();
+void DrawCurrentPage();
+void DrawTodayPage();
+void DrawTomorrowPage();
+void DrawAfterTomorrowPage();
+void DrawPage();
+void PlayVoiceForPage(uint8_t pageIndex);
+void CheckButtons();
+const unsigned char* SelectWeatherIcon(const char* weatherText);
 
 //定义服务器配置
 WiFiManager wifiManager;
@@ -106,27 +159,26 @@ void MQTT_publish(const char* topic, const char* payload) {
 
 void State_publish(bool state_update,bool city_update,bool sensor_update) {
     StaticJsonDocument<256> doc;
-    char buffer[256];
     if(state_update){
         doc["mode"] = (state.remote_mode)?"remote":"local";
         doc["page"] = state.page;
         doc["rssi"] = WiFi.RSSI();
         doc["voicestate"] = state.voice_state;
-        serializeJson(doc, buffer);
-        MQTT_publish("clock/equip1/state", buffer);
+        serializeJson(doc, mqttBuffer);
+        MQTT_publish("clock/equip1/state", mqttBuffer);
         doc.clear();
     }
     if(city_update){
         doc["city"] = state.city;
-        serializeJson(doc, buffer);
-        MQTT_publish("clock/equip1/state/city", buffer);
+        serializeJson(doc, mqttBuffer);
+        MQTT_publish("clock/equip1/state/city", mqttBuffer);
         doc.clear();
     }
     if(sensor_update){
         doc["temperature"] = temperature;
         doc["humidity"] = humidity;
-        serializeJson(doc, buffer);
-        MQTT_publish("clock/equip1/state/sensor", buffer);
+        serializeJson(doc, mqttBuffer);
+        MQTT_publish("clock/equip1/state/sensor", mqttBuffer);
     }
 }
 
@@ -154,13 +206,13 @@ void callback(char* topic, byte* payload, unsigned int length) {
         {
             state.update_future_flag = true;
         }
-        if(!data[3].isNull()&& data[3].as<bool>() != state.voice_state)
+        if(!data[3].isNull())
         {
             state.voice_update = data[3].as<bool>();
         }
-        if(!data[4].isNull()&& data[4].as<bool>() == true)
+        if(!data[4].isNull()&& data[4].as<bool>() != state.voice_state)
         {
-            state.voice_state = true;
+            state.voice_state = data[4].as<bool>();
         }
         State_publish(true, false, false);
     }else if(topicStr == "clock/equip1/set")
@@ -288,6 +340,170 @@ void handlerToday(const char* payload)
     MQTT_publish("clock/equip1/event","today_update");
 }
 
+const unsigned char* SelectWeatherIcon(const char* weatherText) {
+    if (strcmp(weatherText, "晴") == 0) {
+        return sun_bits;
+    } else if (strcmp(weatherText, "多云") == 0) {
+        return cloud_bits;
+    } else if (strcmp(weatherText, "雨") == 0 || strstr(weatherText, "雨")) {
+        return rain_bits;
+    } else if (strcmp(weatherText, "雪") == 0 || strstr(weatherText, "雪")) {
+        return snow_bits;
+    } else {
+        return overcast_bits;
+    }
+}
+
+void DrawStatusBar() {
+    u8g2.setFont(u8g2_font_6x12_tf);
+    u8g2.drawHLine(0, 13, 128);
+
+    snprintf(timeBuf, sizeof(timeBuf), "%02d:%02d", timeInfo.tm_hour, timeInfo.tm_min);
+    u8g2.drawStr(0, 11, timeBuf);
+
+    String city = state.city;
+    if (city.length() > 12) {
+        city = city.substring(0, 12);
+    }
+    int16_t cityWidth = u8g2.getUTF8Width(city.c_str());
+    int16_t cityX = max(0, (128 - cityWidth) / 2);
+    u8g2.drawUTF8(cityX, 11, city.c_str());
+
+    const char* voice = state.voice_state ? "VOC" : "MUT";
+    int16_t voiceWidth = u8g2.getUTF8Width(voice);
+    u8g2.drawStr(128 - voiceWidth, 11, voice);
+}
+
+void DrawCurrentPage() {
+    u8g2.firstPage();
+    do {
+        DrawStatusBar();
+        const unsigned char* icon = SelectWeatherIcon(weatherToday.weatherText);
+        u8g2.drawXBMP(8, 20, 16, 16, icon);
+
+        u8g2.setFont(u8g2_font_logisoso20_tf);
+        snprintf(temperatureBuf, sizeof(temperatureBuf), "%s°C", weatherToday.Temperature);
+        u8g2.drawUTF8(36, 44, temperatureBuf);
+
+        u8g2.setFont(u8g2_font_wqy12_t_gb2312);
+        u8g2.drawUTF8(40, 60, weatherToday.weatherText);
+
+        snprintf(sensorBuf, sizeof(sensorBuf), "T:%d°C H:%d%%", (int)temperature, (int)humidity);
+        u8g2.drawUTF8(0, 62, sensorBuf);
+    } while (u8g2.nextPage());
+}
+
+void DrawFuturePage(uint8_t index, const char* label) {
+    u8g2.firstPage();
+    do {
+        DrawStatusBar();
+        u8g2.setFont(u8g2_font_wqy12_t_gb2312);
+
+        snprintf(titleBuf, sizeof(titleBuf), "%s %s", label, weather[index].day);
+        u8g2.drawUTF8(0, 28, titleBuf);
+
+        snprintf(rangeBuf, sizeof(rangeBuf), "%s°C ~ %s°C", weather[index].MinTemp, weather[index].MaxTemp);
+        u8g2.drawUTF8(0, 40, rangeBuf);
+
+        snprintf(dayNightBuf, sizeof(dayNightBuf), "日:%s 夜:%s", weather[index].day, weather[index].night);
+        u8g2.drawUTF8(0, 50, dayNightBuf);
+
+        snprintf(detailsBuf, sizeof(detailsBuf), "降水:%s%% %s %s级", weather[index].rain, weather[index].wind_direction, weather[index].wind_scale);
+        u8g2.drawUTF8(0, 62, detailsBuf);
+    } while (u8g2.nextPage());
+}
+
+void DrawTodayPage() {
+    DrawFuturePage(0, "今日");
+}
+
+void DrawTomorrowPage() {
+    DrawFuturePage(1, "明日");
+}
+
+void DrawAfterTomorrowPage() {
+    DrawFuturePage(2, "后天");
+}
+
+void DrawPage() {
+    switch (state.page) {
+        case 0:
+            DrawCurrentPage();
+            break;
+        case 1:
+            DrawTodayPage();
+            break;
+        case 2:
+            DrawTomorrowPage();
+            break;
+        case 3:
+        default:
+            DrawAfterTomorrowPage();
+            break;
+    }
+}
+
+void PlayVoiceForPage(uint8_t pageIndex) {
+    if (!state.voice_state) {
+        return;
+    }
+
+    voiceText = "";
+    if (pageIndex == 0) {
+        voiceText = "现在";
+        voiceText += weatherToday.weatherText;
+        voiceText += "温度";
+        voiceText += weatherToday.Temperature;
+        voiceText += "度，室内温度";
+        voiceText += String(temperature, 1);
+        voiceText += "度，湿度百分之";
+        voiceText += String((int)humidity);
+    } else {
+        const char* label = pageIndex == 1 ? "今天" : (pageIndex == 2 ? "明天" : "后天");
+        Weather &w = weather[pageIndex - 1];
+        voiceText = String(label) + "天气，白天";
+        voiceText += w.day;
+        voiceText += "，夜间";
+        voiceText += w.night;
+        voiceText += "，温度";
+        voiceText += w.MinTemp;
+        voiceText += "到";
+        voiceText += w.MaxTemp;
+        voiceText += "度，降水概率百分之";
+        voiceText += w.rain;
+        voiceText += "，";
+        voiceText += w.wind_direction;
+        voiceText += w.wind_scale;
+        voiceText += "级。";
+    }
+    Serial1.println(voiceText);
+}
+
+void CheckButtons() {
+    bool pagePressed = digitalRead(BUTTON_PAGE) == LOW;
+    if (pagePressed && !pageButtonPressed && millis() - lastPageButtonMillis > 50) {
+        pageButtonPressed = true;
+    }
+    if (!pagePressed && pageButtonPressed) {
+        pageButtonPressed = false;
+        lastPageButtonMillis = millis();
+        state.page = (state.page + 1) % 4;
+        State_publish(true, false, false);
+    }
+
+    bool voicePressed = digitalRead(BUTTON_VOICE) == LOW;
+    if (voicePressed && !voiceButtonPressed && millis() - lastVoiceButtonMillis > 50) {
+        voiceButtonPressed = true;
+    }
+    if (!voicePressed && voiceButtonPressed) {
+        voiceButtonPressed = false;
+        lastVoiceButtonMillis = millis();
+        if (state.voice_state) {
+            PlayVoiceForPage(state.page);
+        }
+    }
+}
+
 void getWeather(String url,enum WeatherType type)
 {
     //私钥：S9iZu2FjVm2I_PwLY
@@ -335,7 +551,11 @@ void getWeather(String url,enum WeatherType type)
 void setup() {
     // put your setup code here, to run once:
     Serial.begin(115200);
+    Serial1.begin(9600);
     dht.begin();
+    pinMode(BUTTON_PAGE, INPUT_PULLUP);
+    pinMode(BUTTON_VOICE, INPUT_PULLUP);
+    u8g2.begin();
     url_update();
     
     wifiManager.addParameter(&custom_city);
@@ -382,6 +602,14 @@ void loop() {
         connectMQTT();
     }
     client.loop();
+    CheckButtons();
+
+    if(state.voice_state && state.voice_update)
+    {
+        PlayVoiceForPage(state.page);
+        state.voice_update = false;
+    }
+
     if(state.update_future_flag)
     {
         getWeather(Future_url,SearchType = Future);
@@ -415,4 +643,10 @@ void loop() {
         }
     }
 
+    if (millis() - lastDisplayUpdate >= 200) {
+        if (getLocalTime(&timeInfo, 0)) {
+            DrawPage();
+        }
+        lastDisplayUpdate = millis();
+    }
 }
