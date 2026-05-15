@@ -20,6 +20,7 @@
 <br>
 > 请求消息发送示例：
 > ```json
-> {"command" : ["shanghai", true]}
+> {"command" : ["shanghai",true]}
+  **注意布尔状态值不要加引号**
 > ```
 > 空值要用 `null` 占位

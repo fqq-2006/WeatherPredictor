@@ -10,6 +10,7 @@
 #include <ArduinoJson.h>
 #include <cstring>
 #include "Voice.h"
+#include "Serial_Debug.h"
 
 #define DHTPIN 13
 #define DHTTYPE DHT11
@@ -54,15 +55,10 @@ char mqttBuffer[256];
 String voiceText;
 
 unsigned long lastDisplayUpdate = 0;
-unsigned long lastPageButtonMillis = 0;
-unsigned long lastVoiceButtonMillis = 0;
 unsigned long lastAutoSwitch = 0;
-unsigned long lastSwitchMillis = 0;
-unsigned long lastSilentMillis = 0;
-bool pageButtonPressed = false;
-bool voiceButtonPressed = false;
-bool switchPressed = false;
-bool silentPressed = false;
+
+// 按键消抖延迟（毫秒）
+#define DEBOUNCE_DELAY 30
 
 
 //数据初始化
@@ -76,36 +72,13 @@ enum WeatherType{
 
 struct tm timeInfo;
 
-struct Weather{
-  char date[20];
-  char MaxTemp[10];
-  char MinTemp[10];
-  char Temperature[10];
-  char weatherText[50];
-  char day[50];
-  char night[50];
-  char rain[10];
-  char wind_direction[20];
-  char wind_scale[10];
-  char weather_code[4];
-  char day_code[4];
-  char night_code[4];
-} weather[3],weatherToday;
+Weather weather[3], weatherToday;
 unsigned long Future_updateTime, Today_updateTime;
 unsigned long lastMQTTStateUpdate ;
 
 unsigned long lastDHTUpdate = 0;
 float temperature,humidity;
-struct State{
-    bool remote_mode; 
-    uint8_t page;
-    bool voice_state;
-    String city;
-    bool voice_update;
-    bool update_today_flag ;
-    bool update_future_flag ;
-    bool power_on;
-} state = {false,0,true,"beijing",false,false,false,true};
+State state = {false,0,true,"beijing",false,false,false,true};
 
 void DrawStatusBar();
 void DrawCurrentPage();
@@ -248,6 +221,7 @@ void callback(char* topic, byte* payload, unsigned int length) {
         // 更新语音开关状态 (data[4])
         if(!data[4].isNull()&& data[4].as<bool>() != state.voice_state)
         {
+            Serial.println("更新语音开关状态");
             state.voice_state = data[4].as<bool>();
         }
         // 发布更新后的设备状态
@@ -274,6 +248,9 @@ void callback(char* topic, byte* payload, unsigned int length) {
             state.remote_mode = data[1].as<bool>();
             Serial.print("远控模式设置为: ");
             Serial.println(state.remote_mode);
+            if(!state.remote_mode){
+                lastAutoSwitch = millis();
+            }
             State_publish(true, false, false); // 发布模式变更
         }
     }
@@ -524,6 +501,7 @@ void PlayVoiceForPage(uint8_t pageIndex) {
     if (!state.voice_state) {
         return;
     }
+    Serial.println("播报中...");
 
     // 逐词输出：每个部分都是纯GBK，不混用编码
     if (pageIndex == 0) {
@@ -559,58 +537,92 @@ void PlayVoiceForPage(uint8_t pageIndex) {
     Serial1.println();
 }
 
-void CheckButtons() {
-   
-    bool swRead = digitalRead(BUTTON_SWITCH) == HIGH;
-    if (swRead && !switchPressed && millis() - lastSwitchMillis > 50) {
-        switchPressed = true;
+// 按键消抖
+// 每次调用读取引脚，当检测到稳定状态变化时返回 true
+// 通过 risingEdge 指示变化方向
+bool debounceButton(int pin, unsigned long &lastDebounceTime, bool &lastState, bool &stableState, bool &risingEdge) {
+    bool current = digitalRead(pin);
+    unsigned long now = millis();
+
+    if (current != lastState) {
+        lastDebounceTime = now;
+        lastState = current;
     }
-    if (!swRead && switchPressed) {
-        switchPressed = false;
-        lastSwitchMillis = millis();
-        state.power_on = !state.power_on;
-        if (state.power_on) {
-            u8g2.setPowerSave(0);  // 唤醒屏幕
-            Serial.println("电源打开");
-        } else {
-            u8g2.setPowerSave(1);  // 关闭屏幕
-            state.voice_state = false; // 同时关闭语音
-            Serial.println("电源关闭");
+
+    if ((now - lastDebounceTime) > DEBOUNCE_DELAY && current != stableState) {
+        risingEdge = (current == HIGH && stableState == LOW);
+        stableState = current;
+        return true;
+    }
+    return false;
+}
+
+void CheckButtons() {
+    // --- 电源开关 (BUTTON_SWITCH) ---
+    static unsigned long swDebounce = 0;
+    static bool swLast = LOW, swStable = LOW;
+    bool swRising;
+
+    if (debounceButton(BUTTON_SWITCH, swDebounce, swLast, swStable, swRising)) {
+        if (!swRising) { // 下降沿（释放时）触发
+            state.power_on = !state.power_on;
+            if (state.power_on) {
+                u8g2.setPowerSave(0);  // 唤醒屏幕
+                lastAutoSwitch = millis();
+                state.voice_state = true;
+                Serial.println("电源打开");
+            } else {
+                u8g2.setPowerSave(1);  // 关闭屏幕
+                state.voice_state = false;
+                Serial.println("电源关闭");
+            }
+            State_publish(true, false, false);
         }
-        State_publish(true, false, false);
     }
 
     // remote_mode 下禁用所有本地操控
-    if (state.remote_mode) return;
+    if (state.remote_mode || !state.power_on) return;
 
-    
-    bool pagePressed = digitalRead(BUTTON_PAGE) == HIGH;
-    if (pagePressed && !pageButtonPressed && millis() - lastPageButtonMillis > 50) {
-        pageButtonPressed = true;
-    }
-    if (!pagePressed && pageButtonPressed) {
-        pageButtonPressed = false;
-        lastPageButtonMillis = millis();
-        state.page = (state.page + 1) % 4;
-        lastAutoSwitch = millis(); // 手动翻页后重置自动计时
-        if (state.power_on && state.voice_state) {
-            PlayVoiceForPage(state.page);
+    // --- 翻页按键 (BUTTON_PAGE) ---
+    static unsigned long pageDebounce = 0;
+    static bool pageLast = LOW, pageStable = LOW;
+    bool pageRising;
+
+    if (debounceButton(BUTTON_PAGE, pageDebounce, pageLast, pageStable, pageRising)) {
+        if (!pageRising) { // 释放时触发
+            state.page = (state.page + 1) % 4;
+            lastAutoSwitch = millis(); // 手动翻页后重置自动计时
+            if (state.voice_state) {
+                PlayVoiceForPage(state.page);
+            }
+            State_publish(true, false, false);
         }
-        State_publish(true, false, false);
     }
 
-    // === 静音按钮
-    bool silentRead = digitalRead(BUTTON_SILENT) == HIGH;
-    if (silentRead && !silentPressed && millis() - lastSilentMillis > 50) {
-        silentPressed = true;
+    // --- 静音按键 (BUTTON_SILENT) ---
+    static unsigned long silentDebounce = 0;
+    static bool silentLast = LOW, silentStable = LOW;
+    bool silentRising;
+
+    if (debounceButton(BUTTON_SILENT, silentDebounce, silentLast, silentStable, silentRising)) {
+        if (!silentRising) { // 释放时触发
+            state.voice_state = !state.voice_state;
+            Serial.print("语音");
+            Serial.println(state.voice_state ? "开启" : "关闭");
+            State_publish(true, false, false);
+        }
     }
-    if (!silentRead && silentPressed) {
-        silentPressed = false;
-        lastSilentMillis = millis();
-        state.voice_state = !state.voice_state;
-        Serial.print("语音");
-        Serial.println(state.voice_state ? "开启" : "关闭");
-        State_publish(true, false, false);
+
+    // --- 播报按键 (BUTTON_VOICE) ---
+    static unsigned long voiceDebounce = 0;
+    static bool voiceLast = LOW, voiceStable = LOW;
+    bool voiceRising;
+
+    if (debounceButton(BUTTON_VOICE, voiceDebounce, voiceLast, voiceStable, voiceRising)) {
+        if (!voiceRising) { // 释放时触发
+            state.voice_update = true;
+            State_publish(true, false, false);
+        }
     }
 }
 
@@ -672,7 +684,7 @@ void setup() {
     // 初始化DHT传感器
     dht.begin();
     
-    // 配置按钮引脚为上拉输入模式
+    // 配置按钮引脚
     pinMode(BUTTON_PAGE, INPUT);
     pinMode(BUTTON_VOICE, INPUT);
     pinMode(BUTTON_SILENT, INPUT);
@@ -681,7 +693,7 @@ void setup() {
     // 默认开机，电源按钮在 loop 中通过 CheckButtons 切换
     
     // 初始化OLED显示屏
-    Wire.begin();
+    Wire.begin(); 
     u8g2.begin();
     
     // 生成初始API URL
@@ -744,6 +756,7 @@ void setup() {
     // 配网完成后立即刷新显示，确保从配网界面正确过渡
     if (state.power_on && getLocalTime(&timeInfo, 0)) {
         DrawPage();
+        lastAutoSwitch = millis();
     }
     
     // 发布初始状态
@@ -766,14 +779,15 @@ void loop() {
         state.page = (state.page + 1) % 4;
         lastAutoSwitch = millis();
         if (state.voice_state) {
-            PlayVoiceForPage(state.page);
+            state.voice_update = true;
         }
         State_publish(true, false, false);
     }
-
-    if(state.voice_state && state.voice_update)
+    //触发语音播报
+    if(state.voice_update)
     {
-        PlayVoiceForPage(state.page);
+        if(state.voice_state)
+            PlayVoiceForPage(state.page);
         state.voice_update = false; // 清除标志位
     }
 
@@ -825,9 +839,17 @@ void loop() {
         if (state.power_on) {
             // 获取最新时间
             if (getLocalTime(&timeInfo, 0)) {
-                DrawPage();
+                //DrawPage();
             }
         }
         lastDisplayUpdate = millis();
     }
+
+    // 每5秒输出一次调试信息到串口
+    /*    static unsigned long lastDebugPrint = 0;
+    if (millis() - lastDebugPrint >= 5000) {
+        SerialPrintDebug();
+        lastDebugPrint = millis();
+    }
+    */
 }
