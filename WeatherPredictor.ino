@@ -69,6 +69,8 @@ enum WeatherType{
   Today = 0,
   Future
 } SearchType;
+bool TodayWeatherGetFail = 0;
+bool FutureWeatherGetFail = 0;
 
 struct tm timeInfo;
 
@@ -285,20 +287,21 @@ void handlerFuture(const char* payload){
 
     // 提取每日天气数组
     JsonArray daily = doc["results"][0]["daily"];
-
+    float rain_Probability = 0;
     // 遍历并保存未来3天的天气数据到全局结构体
     for(int i = 0; i < 3; i++)
     {
-        strcpy(weather[i].date, daily[i]["date"].as<const char*>());
-        strcpy(weather[i].MaxTemp, daily[i]["high"].as<const char*>());
-        strcpy(weather[i].MinTemp, daily[i]["low"].as<const char*>());
-        strcpy(weather[i].day, daily[i]["text_day"].as<const char*>());
-        strcpy(weather[i].night, daily[i]["text_night"].as<const char*>());
-        strcpy(weather[i].rain, daily[i]["precip"].as<const char*>());
-        strcpy(weather[i].wind_direction, daily[i]["wind_direction"].as<const char*>());
-        strcpy(weather[i].wind_scale, daily[i]["wind_scale"].as<const char*>());
-        strcpy(weather[i].day_code, daily[i]["code_day"].as<const char*>());    
-        strcpy(weather[i].night_code, daily[i]["code_night"].as<const char*>());
+        snprintf(weather[i].date,     sizeof(weather[i].date),     "%s", daily[i]["date"]         | "");
+        snprintf(weather[i].MaxTemp,  sizeof(weather[i].MaxTemp),  "%s", daily[i]["high"]         | "");
+        snprintf(weather[i].MinTemp,  sizeof(weather[i].MinTemp),  "%s", daily[i]["low"]          | "");
+        snprintf(weather[i].day,      sizeof(weather[i].day),      "%s", daily[i]["text_day"]     | "");
+        snprintf(weather[i].night,    sizeof(weather[i].night),    "%s", daily[i]["text_night"]   | "");
+        rain_Probability = 100*(daily[i]["precip"] ? atof(daily[i]["precip"].as<const char*>()) : 0);
+        snprintf(weather[i].rain,     sizeof(weather[i].rain),     "%.0f", rain_Probability);
+        snprintf(weather[i].wind_direction, sizeof(weather[i].wind_direction), "%s", daily[i]["wind_direction"] | "");
+        snprintf(weather[i].wind_scale, sizeof(weather[i].wind_scale), "%s", daily[i]["wind_scale"] | "");
+        snprintf(weather[i].day_code, sizeof(weather[i].day_code), "%s", daily[i]["code_day"]     | "");
+        snprintf(weather[i].night_code,sizeof(weather[i].night_code),"%s", daily[i]["code_night"]  | "");
     }
 
     // 打印调试信息到串口
@@ -343,9 +346,9 @@ void handlerToday(const char* payload)
     Today_updateTime = millis();
     
     // 提取当前温度和天气状况文本
-    strcpy(weatherToday.Temperature, results["now"]["temperature"].as<const char*>());
-    strcpy(weatherToday.weatherText, results["now"]["text"].as<const char*>());
-    strcpy(weatherToday.weather_code, results["now"]["code"].as<const char*>());
+    snprintf(weatherToday.Temperature, sizeof(weatherToday.Temperature), "%s", results["now"]["temperature"] | "");
+    snprintf(weatherToday.weatherText, sizeof(weatherToday.weatherText), "%s", results["now"]["text"]         | "");
+    snprintf(weatherToday.weather_code,sizeof(weatherToday.weather_code),"%s", results["now"]["code"]         | "");
     
     Serial.println("==========当前天气信息==========");
     Serial.printf("更新时间%d-%d-%d-%02d:%02d:%02d\n",timeInfo.tm_year+1900,timeInfo.tm_mon+1,timeInfo.tm_mday,timeInfo.tm_hour,timeInfo.tm_min,timeInfo.tm_sec);
@@ -669,6 +672,16 @@ void getWeather(String url,enum WeatherType type)
             // 请求失败，打印错误码
             Serial.print("请求失败: ");
             Serial.println(httpCode);
+            if(type == Today)
+            {
+                TodayWeatherGetFail = 1;
+                MQTT_publish("clock/equip1/event","today_get_fail");
+            }
+            else
+            {
+                FutureWeatherGetFail = 1;
+                MQTT_publish("clock/equip1/event","future_get_fail");
+            }
         }
 
         https.end(); // 释放资源
@@ -746,11 +759,27 @@ void setup() {
     // 首次启动时立即获取天气数据
     Serial.println("开始请求当前天气...");
     getWeather(Today_url,SearchType = Today);
+    for(int i = 0; i < 2;i ++)
+    {
+        delay(500);
+        if(TodayWeatherGetFail == 0)
+            break;
+        Serial.println("重试请求当前天气...");
+        getWeather(Today_url,SearchType = Today);
+    }
     Serial.println("当前天气请求完成");
     delay(0);
     
     Serial.println("开始请求未来天气...");
     getWeather(Future_url,SearchType = Future);
+    for(int i = 0; i < 2;i ++)
+    {
+        delay(500);
+        if(FutureWeatherGetFail == 0)
+            break;
+        Serial.println("重试请求未来天气...");
+        getWeather(Future_url,SearchType = Future);
+    }
     Serial.println("未来天气请求完成");
     
     // 配网完成后立即刷新显示，确保从配网界面正确过渡
