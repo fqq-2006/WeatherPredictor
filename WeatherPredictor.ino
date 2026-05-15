@@ -15,8 +15,10 @@
 #define DHTTYPE DHT11
 DHT dht(DHTPIN, DHTTYPE);
 
-#define BUTTON_PAGE 2
+#define BUTTON_PAGE 14
 #define BUTTON_VOICE 15
+#define BUTTON_SILENT 12
+#define BUTTON_SWITCH 16
 
 U8G2_SSD1306_128X64_NONAME_1_HW_I2C u8g2(U8G2_R0, U8X8_PIN_NONE);
 
@@ -54,8 +56,13 @@ String voiceText;
 unsigned long lastDisplayUpdate = 0;
 unsigned long lastPageButtonMillis = 0;
 unsigned long lastVoiceButtonMillis = 0;
+unsigned long lastAutoSwitch = 0;
+unsigned long lastSwitchMillis = 0;
+unsigned long lastSilentMillis = 0;
 bool pageButtonPressed = false;
 bool voiceButtonPressed = false;
+bool switchPressed = false;
+bool silentPressed = false;
 
 
 //数据初始化
@@ -80,6 +87,9 @@ struct Weather{
   char rain[10];
   char wind_direction[20];
   char wind_scale[10];
+  char weather_code[4];
+  char day_code[4];
+  char night_code[4];
 } weather[3],weatherToday;
 unsigned long Future_updateTime, Today_updateTime;
 unsigned long lastMQTTStateUpdate ;
@@ -94,7 +104,8 @@ struct State{
     bool voice_update;
     bool update_today_flag ;
     bool update_future_flag ;
-} state = {false,0,true,"beijing",false,false,false};
+    bool power_on;
+} state = {false,0,true,"beijing",false,false,false,true};
 
 void DrawStatusBar();
 void DrawCurrentPage();
@@ -261,7 +272,7 @@ void callback(char* topic, byte* payload, unsigned int length) {
         if(!data[1].isNull()&& data[1].as<bool>() != state.remote_mode)
         {   
             state.remote_mode = data[1].as<bool>();
-            Serial.print("自动模式设置为: ");
+            Serial.print("远控模式设置为: ");
             Serial.println(state.remote_mode);
             State_publish(true, false, false); // 发布模式变更
         }
@@ -285,6 +296,8 @@ void handlerFuture(const char* payload){
         filter["results"][0]["daily"][i]["precip"] = true;
         filter["results"][0]["daily"][i]["wind_direction"] = true;
         filter["results"][0]["daily"][i]["wind_scale"] = true;
+        filter["results"][0]["daily"][i]["code_day"] = true;
+        filter["results"][0]["daily"][i]["code_night"] = true;
     }
 
     DynamicJsonDocument doc(1024);
@@ -306,7 +319,9 @@ void handlerFuture(const char* payload){
         strcpy(weather[i].night, daily[i]["text_night"].as<const char*>());
         strcpy(weather[i].rain, daily[i]["precip"].as<const char*>());
         strcpy(weather[i].wind_direction, daily[i]["wind_direction"].as<const char*>());
-        strcpy(weather[i].wind_scale, daily[i]["wind_scale"].as<const char*>());    
+        strcpy(weather[i].wind_scale, daily[i]["wind_scale"].as<const char*>());
+        strcpy(weather[i].day_code, daily[i]["code_day"].as<const char*>());    
+        strcpy(weather[i].night_code, daily[i]["code_night"].as<const char*>());
     }
 
     // 打印调试信息到串口
@@ -325,8 +340,10 @@ void handlerFuture(const char* payload){
         Serial.println(weather[i].MaxTemp);
         Serial.print("白天: ");
         Serial.println(weather[i].day);
+        Serial.print(weather[i].day_code);
         Serial.print("夜间: ");
         Serial.println(weather[i].night);
+        Serial.print(weather[i].night_code);
         Serial.print("降水概率：");
         Serial.println(weather[i].rain);
         Serial.print("风向：");
@@ -351,6 +368,7 @@ void handlerToday(const char* payload)
     // 提取当前温度和天气状况文本
     strcpy(weatherToday.Temperature, results["now"]["temperature"].as<const char*>());
     strcpy(weatherToday.weatherText, results["now"]["text"].as<const char*>());
+    strcpy(weatherToday.weather_code, results["now"]["code"].as<const char*>());
     
     Serial.println("==========当前天气信息==========");
     Serial.printf("更新时间%d-%d-%d-%02d:%02d:%02d\n",timeInfo.tm_year+1900,timeInfo.tm_mon+1,timeInfo.tm_mday,timeInfo.tm_hour,timeInfo.tm_min,timeInfo.tm_sec);
@@ -359,6 +377,7 @@ void handlerToday(const char* payload)
     Serial.println(weatherToday.Temperature);
     Serial.print("当前天气：");
     Serial.println(weatherToday.weatherText);
+    Serial.print(weatherToday.weather_code);
     
     // 发布事件通知：当前天气已更新
     MQTT_publish("clock/equip1/event","today_update");
@@ -419,7 +438,7 @@ void DrawCurrentPage() {
 
         // 绘制天气文字描述
         u8g2.setFont(u8g2_font_wqy12_t_gb2312);
-        u8g2.drawUTF8(82, 35, weatherToday.weatherText);
+        u8g2.drawUTF8(95, 35, weatherToday.weatherText);
 
         // 绘制室内温湿度传感器数据
         snprintf(sensorBuf, sizeof(sensorBuf), "T:%d°C H:%d%%", (int)temperature, (int)humidity);
@@ -435,20 +454,22 @@ void DrawFuturePage(uint8_t index, const char* label) {
         u8g2.setFont(u8g2_font_wqy12_t_gb2312);
 
         // 绘制标题：标签 + 白天天气
-        snprintf(titleBuf, sizeof(titleBuf), "%s %s", label, weather[index].day);
-        u8g2.drawUTF8(0, 28, titleBuf);
+        snprintf(titleBuf, sizeof(titleBuf), "%s", label);
+        u8g2.drawUTF8(50, 30, titleBuf);
 
         // 绘制温度范围
         snprintf(rangeBuf, sizeof(rangeBuf), "%s°C ~ %s°C", weather[index].MinTemp, weather[index].MaxTemp);
-        u8g2.drawUTF8(0, 40, rangeBuf);
+        u8g2.drawUTF8(25, 41, rangeBuf);
 
         // 绘制昼夜天气详情
         snprintf(dayNightBuf, sizeof(dayNightBuf), "日:%s 夜:%s", weather[index].day, weather[index].night);
-        u8g2.drawUTF8(0, 50, dayNightBuf);
+        uint16_t dayNightWidth = u8g2.getUTF8Width(dayNightBuf);
+        uint16_t dayNightX = max(0, (128 - dayNightWidth) / 2);
+        u8g2.drawUTF8(dayNightX, 52, dayNightBuf);
 
         // 绘制降水、风向、风力详情
-        snprintf(detailsBuf, sizeof(detailsBuf), "降水:%s%% %s %s级", weather[index].rain, weather[index].wind_direction, weather[index].wind_scale);
-        u8g2.drawUTF8(0, 62, detailsBuf);
+        snprintf(detailsBuf, sizeof(detailsBuf), "降水:%s%% %s风 %s级", weather[index].rain, weather[index].wind_direction, weather[index].wind_scale);
+        u8g2.drawUTF8(0, 63, detailsBuf);
     } while (u8g2.nextPage());
 }
 
@@ -462,6 +483,21 @@ void DrawTomorrowPage() {
 
 void DrawAfterTomorrowPage() {
     DrawFuturePage(2, "后天");
+}
+
+void DrawSetupPage() {
+    u8g2.firstPage();
+    do {
+        // 配网界面：不依赖 timeInfo / DrawStatusBar，独立绘制
+        u8g2.setFont(u8g2_font_6x12_tf);
+        u8g2.drawStr(0, 11, "--:--");
+        u8g2.drawStr(128 - u8g2.getUTF8Width("SETUP"), 11, "SETUP");
+
+        // 提示文字
+        u8g2.setFont(u8g2_font_wqy12_t_gb2312);
+        u8g2.drawUTF8(0, 35, "连接AutoAP并配网");
+        u8g2.drawUTF8(0, 50, "请连接WiFi: AutoConnectAP");
+    } while (u8g2.nextPage());
 }
 
 void DrawPage() {
@@ -479,7 +515,7 @@ void DrawPage() {
         case 3:
         default:
             DrawAfterTomorrowPage();
-            break
+            break;
     }
 }
 
@@ -489,44 +525,66 @@ void PlayVoiceForPage(uint8_t pageIndex) {
         return;
     }
 
-    voiceText = "";
-    // 根据页面索引构建不同的语音播报内容
+    // 逐词输出：每个部分都是纯GBK，不混用编码
     if (pageIndex == 0) {
-        // 首页：播报当前天气及室内传感器数据
-        voiceText = "现在";
-        voiceText += weatherToday.weatherText;
-        voiceText += "温度";
-        voiceText += weatherToday.Temperature;
-        voiceText += "度，室内温度";
-        voiceText += String(temperature, 1);
-        voiceText += "度，湿度百分之";
-        voiceText += String((int)humidity);
+        // 首页：通过天气代码获取GBK文本，逐词播报
+        Serial1.print(V_NOW);
+        Serial1.print(GetWeatherGBK(atoi(weatherToday.weather_code)));
+        Serial1.print(V_TEMP);
+        Serial1.print(weatherToday.Temperature);
+        Serial1.print(V_ROOM);
+        Serial1.print(String(temperature, 1));
+        Serial1.print(V_HUM);
+        Serial1.print((int)humidity);
     } else {
-        // 其他页：播报未来某天的详细天气预报
-        const char* label = pageIndex == 1 ? "今天" : (pageIndex == 2 ? "明天" : "后天");
+        // 其他页：通过day_code/night_code获取GBK天气文本
+        const char* label = pageIndex == 1 ? V_TODAY : (pageIndex == 2 ? V_TOMORROW : V_AFTER);
         Weather &w = weather[pageIndex - 1];
-        voiceText = String(label) + "天气，白天";
-        voiceText += w.day;
-        voiceText += "，夜间";
-        voiceText += w.night;
-        voiceText += "，温度";
-        voiceText += w.MinTemp;
-        voiceText += "到";
-        voiceText += w.MaxTemp;
-        voiceText += "度，降水概率百分之";
-        voiceText += w.rain;
-        voiceText += "，";
-        voiceText += w.wind_direction;
-        voiceText += w.wind_scale;
-        voiceText += "级。";
+        Serial1.print(label);
+        Serial1.print(V_WEATHER);
+        Serial1.print(GetWeatherGBK(atoi(w.day_code)));
+        Serial1.print(V_NIGHT);
+        Serial1.print(GetWeatherGBK(atoi(w.night_code)));
+        Serial1.print(V_RANGE);
+        Serial1.print(w.MinTemp);
+        Serial1.print(V_TO);
+        Serial1.print(w.MaxTemp);
+        Serial1.print(V_RAIN);
+        Serial1.print(w.rain);
+        Serial1.print(V_WIND);
+        Serial1.print(w.wind_direction);
+        Serial1.print(w.wind_scale);
+        Serial1.print(V_LEVEL);
     }
-    // 通过串口1发送语音文本给语音模块
-    Serial1.println(voiceText);
+    Serial1.println();
 }
 
 void CheckButtons() {
-    // 检测翻页按钮 (BUTTON_PAGE)
-    bool pagePressed = digitalRead(BUTTON_PAGE) == LOW;
+   
+    bool swRead = digitalRead(BUTTON_SWITCH) == HIGH;
+    if (swRead && !switchPressed && millis() - lastSwitchMillis > 50) {
+        switchPressed = true;
+    }
+    if (!swRead && switchPressed) {
+        switchPressed = false;
+        lastSwitchMillis = millis();
+        state.power_on = !state.power_on;
+        if (state.power_on) {
+            u8g2.setPowerSave(0);  // 唤醒屏幕
+            Serial.println("电源打开");
+        } else {
+            u8g2.setPowerSave(1);  // 关闭屏幕
+            state.voice_state = false; // 同时关闭语音
+            Serial.println("电源关闭");
+        }
+        State_publish(true, false, false);
+    }
+
+    // remote_mode 下禁用所有本地操控
+    if (state.remote_mode) return;
+
+    
+    bool pagePressed = digitalRead(BUTTON_PAGE) == HIGH;
     if (pagePressed && !pageButtonPressed && millis() - lastPageButtonMillis > 50) {
         pageButtonPressed = true;
     }
@@ -534,22 +592,25 @@ void CheckButtons() {
         pageButtonPressed = false;
         lastPageButtonMillis = millis();
         state.page = (state.page + 1) % 4;
+        lastAutoSwitch = millis(); // 手动翻页后重置自动计时
+        if (state.power_on && state.voice_state) {
+            PlayVoiceForPage(state.page);
+        }
         State_publish(true, false, false);
     }
 
-    // 检测语音播报按钮 (BUTTON_VOICE)
-    bool voicePressed = digitalRead(BUTTON_VOICE) == LOW;
-    if (voicePressed && !voiceButtonPressed && millis() - lastVoiceButtonMillis > 50) {
-        voiceButtonPressed = true;
+    // === 静音按钮
+    bool silentRead = digitalRead(BUTTON_SILENT) == HIGH;
+    if (silentRead && !silentPressed && millis() - lastSilentMillis > 50) {
+        silentPressed = true;
     }
-    // 检测到释放动作
-    if (!voicePressed && voiceButtonPressed) {
-        voiceButtonPressed = false;
-        lastVoiceButtonMillis = millis();
-        // 如果语音功能开启，则触发当前页面的语音播报
-        if (state.voice_state) {
-            PlayVoiceForPage(state.page);
-        }
+    if (!silentRead && silentPressed) {
+        silentPressed = false;
+        lastSilentMillis = millis();
+        state.voice_state = !state.voice_state;
+        Serial.print("语音");
+        Serial.println(state.voice_state ? "开启" : "关闭");
+        State_publish(true, false, false);
     }
 }
 
@@ -612,8 +673,12 @@ void setup() {
     dht.begin();
     
     // 配置按钮引脚为上拉输入模式
-    pinMode(BUTTON_PAGE, INPUT_PULLUP);
-    pinMode(BUTTON_VOICE, INPUT_PULLUP);
+    pinMode(BUTTON_PAGE, INPUT);
+    pinMode(BUTTON_VOICE, INPUT);
+    pinMode(BUTTON_SILENT, INPUT);
+    pinMode(BUTTON_SWITCH, INPUT);
+    
+    // 默认开机，电源按钮在 loop 中通过 CheckButtons 切换
     
     // 初始化OLED显示屏
     Wire.begin();
@@ -625,6 +690,9 @@ void setup() {
     // 添加WiFiManager自定义参数：城市和MQTT服务器地址
     wifiManager.addParameter(&custom_city);
     wifiManager.addParameter(&custom_mqtt);
+    
+    // 显示配网界面
+    DrawSetupPage();
     
     // 启动WiFi配置门户，如果连接失败则重启
     if (!wifiManager.startConfigPortal("AutoConnectAP")) {
@@ -673,6 +741,11 @@ void setup() {
     getWeather(Future_url,SearchType = Future);
     Serial.println("未来天气请求完成");
     
+    // 配网完成后立即刷新显示，确保从配网界面正确过渡
+    if (state.power_on && getLocalTime(&timeInfo, 0)) {
+        DrawPage();
+    }
+    
     // 发布初始状态
     State_publish(true, true, false);
     lastMQTTStateUpdate = millis();
@@ -687,6 +760,16 @@ void loop() {
     }
     client.loop();
     CheckButtons();
+
+    // 自动翻页：开机且本地模式下每20秒切换一次
+    if (state.power_on && !state.remote_mode && millis() - lastAutoSwitch >= 20000) {
+        state.page = (state.page + 1) % 4;
+        lastAutoSwitch = millis();
+        if (state.voice_state) {
+            PlayVoiceForPage(state.page);
+        }
+        State_publish(true, false, false);
+    }
 
     if(state.voice_state && state.voice_update)
     {
@@ -737,11 +820,13 @@ void loop() {
         }
     }
 
-    // 每200毫秒刷新一次屏幕显示
+    // 每200毫秒刷新一次屏幕显示（仅开机时）
     if (millis() - lastDisplayUpdate >= 200) {
-        // 获取最新时间
-        if (getLocalTime(&timeInfo, 0)) {
-            DrawPage(); // 绘制当前页面
+        if (state.power_on) {
+            // 获取最新时间
+            if (getLocalTime(&timeInfo, 0)) {
+                DrawPage();
+            }
         }
         lastDisplayUpdate = millis();
     }
