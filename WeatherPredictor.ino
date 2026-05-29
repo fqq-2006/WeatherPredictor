@@ -875,10 +875,10 @@ void loop() {
     }
 
     // 每5秒输出一次调试信息到串口
-        static unsigned long lastDebugPrint = 0;
-    if (millis() - lastDebugPrint >= 5000) {
+    /*static unsigned long lastDebugPrint = 0;
+    if (millis() - lastDebugPrint >= 5000) {.
         SerialPrintDebug();
         lastDebugPrint = millis();
     }
-    
+    */
 }
