@@ -686,7 +686,7 @@ void getWeather(String url,enum WeatherType type)
 
         https.end(); // 释放资源
     }
-    delay(0); // 让出 CPU，避免长时间阻塞软看门狗
+    delay(0);
 }
 
 void setup() {
@@ -868,17 +868,17 @@ void loop() {
         if (state.power_on) {
             // 获取最新时间
             if (getLocalTime(&timeInfo, 0)) {
-                //DrawPage();
+                DrawPage();
             }
         }
         lastDisplayUpdate = millis();
     }
 
     // 每5秒输出一次调试信息到串口
-    /*    static unsigned long lastDebugPrint = 0;
+        static unsigned long lastDebugPrint = 0;
     if (millis() - lastDebugPrint >= 5000) {
         SerialPrintDebug();
         lastDebugPrint = millis();
     }
-    */
+    
 }
