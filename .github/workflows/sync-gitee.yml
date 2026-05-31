@@ -1,0 +1,32 @@
+name: Sync from Gitee Now
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: main          # 确保检出 main 分支
+
+      - name: Configure Git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Add Gitee remote
+        run: git remote add gitee https://gitee.com/fqq_2006/weather-predictor.git
+
+      - name: Fetch and merge from Gitee
+        run: |
+          git fetch gitee
+          git merge gitee/main --allow-unrelated-histories -m "Sync from Gitee"
+
+      - name: Push to GitHub
+        run: git push origin main
